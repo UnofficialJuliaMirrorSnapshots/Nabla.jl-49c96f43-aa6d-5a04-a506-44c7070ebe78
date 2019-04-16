@@ -179,22 +179,39 @@ output and `ȳ` the reverse-mode sensitivity of `y`.
 ∇(y::Node, ȳ) = propagate(tape(y), reverse_tape(y, ȳ))
 @inline ∇(y::Node{<:∇Scalar}) = ∇(y, one(unbox(y)))
 
-@inline ∇(x̄, f, ::Type{Arg{N}}, args...) where N = x̄ + ∇(f, Arg{N}, args...)
+# This is a fallback method where we don't necessarily know what we'll be adding and whether
+# we can update the value in-place, so we'll try to be clever and dispatch.
+@inline ∇(x̄, f, ::Type{Arg{N}}, args...) where {N} = update!(x̄, ∇(f, Arg{N}, args...))
+
+# Update regular arrays in-place. Structured array types should not be updated in-place,
+# even though it technically "works" (https://github.com/JuliaLang/julia/issues/31674),
+# so we'll only permit mutating addition for `Array`s, e.g. `Vector` and `Matrix`.
+# Mixed array and scalar adds should not occur, as sensitivities should always have the
+# same shape, so we won't bother allowing e.g. updating an array with a scalar on the RHS.
+update!(x̄::Array{T,N}, y::AbstractArray{S,N}) where {T,S,N} = x̄ .+= y
+
+# Fall back to using regular addition
+update!(x̄, y) = x̄ + y
 
 """
     ∇(f; get_output::Bool=false)
 
 Returns a function which, when evaluated with arguments that are accepted by `f`, will
-return the gradient w.r.t. each of the arguments.
+return the gradient w.r.t. each of the arguments. If `get_output` is `true`, the result
+of calling `f` on the given arguments is also returned.
 """
 function ∇(f; get_output::Bool=false)
     return function(args...)
         args_ = Leaf.(Tape(), args)
         y = f(args_...)
-        y isa Node || return zero.(args)
-        ∇f = ∇(y)
-        ∇args = ([isassigned(∇f, arg_) ? ∇f[arg_] : zero(arg)
-                  for (arg_, arg) in zip(args_, args)]...,)
+        if y isa Node
+            ∇f = ∇(y)
+            ∇args = map(args_, args) do arg_, arg
+                isassigned(∇f, arg_) ? ∇f[arg_] : zero(arg)
+            end
+        else
+            ∇args = zero.(args)
+        end
         return get_output ? (y, ∇args) : ∇args
     end
 end
