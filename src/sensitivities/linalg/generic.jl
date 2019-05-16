@@ -1,7 +1,7 @@
 # Implementation of sensitivities for unary linalg optimisations.
 _ϵ, lb, ub = 3e-2, -3.0, 3.0
 unary_linalg_optimisations = [
-    (:-,          ∇Array,  ∇Array,  :(map(-, Ȳ)),                        (lb, ub)),
+    (:-,          ∇Array,  ∇Array,  :(-Ȳ),                               (lb, ub)),
     (:tr,         ∇Array,  ∇Scalar, :(Diagonal(fill!(similar(X), Ȳ))),   (lb, ub)),
     (:inv,        ∇Array,  ∇Array,  :(-transpose(Y) * Ȳ * transpose(Y)), (lb, ub)),
     (:det,        ∇Array,  ∇Scalar, :(Y * Ȳ * transpose(inv(X))),        (_ϵ, ub)),
@@ -28,73 +28,17 @@ end
 const A = ∇Array
 const S = ∇Scalar
 const AS = Union{∇Scalar, ∇Array}
-const AT = Transpose{<:∇Scalar, ∇Array}
-const AH = Adjoint{<:∇Scalar, ∇Array}
 δ = 1e-5
 binary_linalg_optimisations = [
     (:*, A, A, AS,
         :(Ȳ * B'),
         :(A' * Ȳ)),
-    (:*, AT, A, AS,
-        :(B * transpose(Ȳ)),
-        :(A * Ȳ)),
-    (:*, A, AT, AS,
-        :(Ȳ * B),
-        :(transpose(Ȳ) * A)),
-    (:*, AT, AT, AS,
-        :(transpose(B) * transpose(Ȳ)),
-        :(transpose(Ȳ) * transpose(A))),
-    (:*, AH, A, AS,
-        :(B * transpose(Ȳ)),
-        :(A * Ȳ)),
-    (:*, A, AH, AS,
-        :(Ȳ * B),
-        :(Ȳ' * A)),
-    (:*, AH, AH, AS,
-        :(B' * Ȳ'),
-        :(Ȳ' * A')),
     (:/, A, A, AS,
         :(Ȳ / transpose(B)),
         :(-transpose(Y) * (Ȳ / transpose(B)))),
-    (:/, AT, A, AS,
-        :(B \ transpose(Ȳ)),
-        :(-transpose(Y) * (Ȳ / transpose(B)))),
-    (:/, A, AT, AS,
-        :(Ȳ / B),
-        :(-(transpose(B) \ transpose(Ȳ)) * Y)),
-    (:/, AT, AT, AS,
-        :(transpose(B) \ transpose(Ȳ)),
-        :(-(transpose(B) \ transpose(Ȳ)) * Y)),
-    (:/, AH, A, AS,
-        :(B \ Ȳ'),
-        :(-Y' * (Ȳ / B'))),
-    (:/, A, AH, AS,
-        :(Ȳ / B),
-        :(-(transpose(B) \ transpose(Ȳ)) * Y)),
-    (:/, AH, AH, AS,
-        :(B' \ Ȳ'),
-        :(-(B' \ Ȳ') * Y)),
     (:\, A, A, AS,
         :(-(transpose(A) \ Ȳ) * transpose(Y)),
         :(transpose(A) \ Ȳ)),
-    (:\, AT, A, AS,
-        :(-Y * transpose(A \ Ȳ)),
-        :(A \ Ȳ)),
-    (:\, A, AT, AS,
-        :(-transpose(transpose(Ȳ) / A) * transpose(Y)),
-        :(transpose(Ȳ) / A)),
-    (:\, AT, AT, AS,
-       :(-Y * (transpose(Ȳ) / transpose(A))),
-       :(transpose(Ȳ) / transpose(A))),
-    (:\, AH, A, AS,
-        :(-Y * (A \ Ȳ)'),
-        :(A \ Ȳ)),
-    (:\, A, AH, AS,
-        :(-(Ȳ' / A)' * Y),
-        :(Ȳ' / A)),
-    (:\, AH, AH, AS,
-        :(-Y * (Ȳ' / A')),
-        :(Ȳ' / A')),
     (:norm, A, S, S,
         :(Ȳ .* Y^(1 - B) .* abs.(A).^B ./ A),
         :(Ȳ * (Y^(1 - B) * sum(abs.(A).^B .* log.(abs.(A))) - Y * log(Y)) / B)),
@@ -163,3 +107,24 @@ end
 import Base: copy
 @explicit_intercepts copy Tuple{Any}
 ∇(::typeof(copy), ::Type{Arg{1}}, p, Y, Ȳ, A) = copy(Ȳ)
+
+# Matrix exponential
+# Ported from Theano, see https://github.com/Theano/Theano/blob/3b8a5b342b30c7ffd2f89f0...
+# e9efef601b7492411/theano/tensor/slinalg.py#L518-L553
+# Implementation there is based on Kalbfleisch and Lawless, 1985, The Analysis of Panel
+# Data Under a Markov Assumption.
+import Base: exp
+@explicit_intercepts exp Tuple{AbstractMatrix{<:∇Scalar}}
+function ∇(::typeof(exp), ::Type{Arg{1}}, p, Y, Ȳ, X::AbstractMatrix)
+    # TODO: Make this work for asymmetric matrices
+    issymmetric(X) || throw(ArgumentError("input is not symmetric; eigenvalues are complex"))
+    n = LinearAlgebra.checksquare(X)
+    λ, U = eigen(X)
+    eλ = exp.(λ)
+    Z = @inbounds begin
+        eltype(eλ)[i == j ? eλ[i] : (eλ[i] - eλ[j]) / (λ[i] - λ[j]) for i = 1:n, j = 1:n]
+    end
+    Uᵀ = transpose(U)
+    F = factorize(Uᵀ)
+    return real(F \ (Uᵀ * Ȳ / F .* Z) * Uᵀ)
+end
